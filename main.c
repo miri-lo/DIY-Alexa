@@ -22,6 +22,12 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+
+#include "funk.h"
+#include "mikro.h"
 
 /* USER CODE END Includes */
 
@@ -48,13 +54,26 @@ ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]; /* Ethernet Tx DMA Descriptor
 
 ETH_HandleTypeDef heth;
 
-TIM_HandleTypeDef htim2;
+I2S_HandleTypeDef hi2s2;
+DMA_HandleTypeDef hdma_spi2_rx;
+
+TIM_HandleTypeDef htim4;
 
 UART_HandleTypeDef huart3;
 
 PCD_HandleTypeDef hpcd_USB_OTG_FS;
 
 /* USER CODE BEGIN PV */
+
+// 1 second of audio at 16 kHz = 16000 final samples
+//constexpr uint32_t PCM_SAMPLES_PER_SEC = 16000;
+volatile bool recording_finished = false;
+TIM_HandleTypeDef* TIMER = &htim4;
+UART_HandleTypeDef* display =  &huart3;
+I2S_HandleTypeDef* mikro = &hi2s2;
+
+extern int timer;
+
 // declare pins
 typedef struct {
 	GPIO_TypeDef* port;
@@ -66,7 +85,7 @@ typedef struct {
 Segment_t segments[10] = {
 		{GPIOA, GPIO_PIN_3, 0}, //A0 - A
 		{GPIOC, GPIO_PIN_0, 0}, //A1 - B
-		{GPIOC, GPIO_PIN_3, 0}, //A2 - C
+		{GPIOC, GPIO_PIN_2, 0}, //A2 - C -> A7
 		{GPIOF, GPIO_PIN_3, 0}, //A3 - D
 		{GPIOF, GPIO_PIN_5, 0}, //A4 - E
 		{GPIOF, GPIO_PIN_10, 0}, //A5 - F
@@ -81,18 +100,22 @@ Segment_t segments[10] = {
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_ETH_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_USB_OTG_FS_PCD_Init(void);
-static void MX_TIM2_Init(void);
+static void MX_TIM4_Init(void);
+static void MX_I2S2_Init(void);
 /* USER CODE BEGIN PFP */
 
+
+
+
 // declare light functions
-void gradualLightUp(void);
+//void gradualLightUp(void);
 void gradualLightDown(void);
+void gradualLightUp();
 void turnOffAllSegments(void);
-// microseconds delay function
-void delay350Microseconds(uint32_t n);
 
 /* USER CODE END PFP */
 
@@ -109,6 +132,7 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
+
 
   /* USER CODE END 1 */
 
@@ -130,29 +154,80 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_ETH_Init();
   MX_USART3_UART_Init();
   MX_USB_OTG_FS_PCD_Init();
-  MX_TIM2_Init();
+  MX_TIM4_Init();
+  MX_I2S2_Init();
   /* USER CODE BEGIN 2 */
 
+   //printf("recording finished\r\n");
+   //HAL_I2S_Receive_DMA(&hi2s2, (uint16_t*)inputBuffer, I2S_DMA_BUF_SIZE);
+   HAL(&hi2s2);
 
+    sendSequence("111111000010");
+
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET); // LED2 dauerhaft an
+    HAL_Delay(5000);
+
+    sendSequence("111111000001");
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET); // LED2 dauerhaft aus
+
+    recording_finished = true;
+    volatile bool stecker_an = false;
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  gradualLightUp();
-	  delay350Microseconds(2857);
-	  gradualLightDown();
-	  delay350Microseconds(2857);
+
+	  if (recording_finished) {
+
+	 		  //HAL_GPIO_WritePin(LD1_GPIO_Port, LD1_Pin, GPIO_PIN_SET);
+	 		  //const char *message = "Recording Ended.\r\n";
+	 		  // Ensure huart2 is available and transmit the message.
+
+
+
+	 		  getSamples();
+	 		 recording_finished = false;
+	 	     }
+
+  uint32_t volume = getCurrentVolume();
+  int ledCount = (volume * 10) / 32768; // scale 0-10
+		  if(ledCount > 10) {
+			  ledCount = 10;
+		  }
+		  turnOffAllSegments();
+  for(int i = 0; i < 10; i++) {
+	  if(i < ledCount) {
+		  HAL_GPIO_WritePin(segments[i].port, segments[i].pin, GPIO_PIN_SET);
+	  } else {
+		  HAL_GPIO_WritePin(segments[i].port, segments[i].pin, GPIO_PIN_RESET);
+	  }
+  }
+
+  HAL_Delay(50);
+
+
+  //LED_ansteuern(ledCount);
+}
+}
+/*
+		 gradualLightUp(10);
+		 HAL_Delay(1000);
+		 gradualLightDown();
+		 HAL_Delay(1000);
+		 */
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-  }
+
   /* USER CODE END 3 */
-}
+
 
 /**
   * @brief System Clock Configuration
@@ -190,7 +265,7 @@ void SystemClock_Config(void)
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV16;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
 
   if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5) != HAL_OK)
@@ -249,47 +324,81 @@ static void MX_ETH_Init(void)
 }
 
 /**
-  * @brief TIM2 Initialization Function
+  * @brief I2S2 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_TIM2_Init(void)
+static void MX_I2S2_Init(void)
 {
 
-  /* USER CODE BEGIN TIM2_Init 0 */
+  /* USER CODE BEGIN I2S2_Init 0 */
 
-  /* USER CODE END TIM2_Init 0 */
+  /* USER CODE END I2S2_Init 0 */
+
+  /* USER CODE BEGIN I2S2_Init 1 */
+
+  /* USER CODE END I2S2_Init 1 */
+  hi2s2.Instance = SPI2;
+  hi2s2.Init.Mode = I2S_MODE_MASTER_RX;
+  hi2s2.Init.Standard = I2S_STANDARD_PHILIPS;
+  hi2s2.Init.DataFormat = I2S_DATAFORMAT_24B;
+  hi2s2.Init.MCLKOutput = I2S_MCLKOUTPUT_DISABLE;
+  hi2s2.Init.AudioFreq = I2S_AUDIOFREQ_16K;
+  hi2s2.Init.CPOL = I2S_CPOL_LOW;
+  hi2s2.Init.ClockSource = I2S_CLOCK_PLL;
+  hi2s2.Init.FullDuplexMode = I2S_FULLDUPLEXMODE_DISABLE;
+  if (HAL_I2S_Init(&hi2s2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2S2_Init 2 */
+
+  /* USER CODE END I2S2_Init 2 */
+
+}
+
+/**
+  * @brief TIM4 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM4_Init(void)
+{
+
+  /* USER CODE BEGIN TIM4_Init 0 */
+
+  /* USER CODE END TIM4_Init 0 */
 
   TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
 
-  /* USER CODE BEGIN TIM2_Init 1 */
+  /* USER CODE BEGIN TIM4_Init 1 */
 
-  /* USER CODE END TIM2_Init 1 */
-  htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 83;
-  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 65535 ;
-  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+  /* USER CODE END TIM4_Init 1 */
+  htim4.Instance = TIM4;
+  htim4.Init.Prescaler = 20;
+  htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim4.Init.Period = 800;
+  htim4.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim4.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim4) != HAL_OK)
   {
     Error_Handler();
   }
   sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
+  if (HAL_TIM_ConfigClockSource(&htim4, &sClockSourceConfig) != HAL_OK)
   {
     Error_Handler();
   }
   sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
   sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim4, &sMasterConfig) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN TIM2_Init 2 */
+  /* USER CODE BEGIN TIM4_Init 2 */
 
-  /* USER CODE END TIM2_Init 2 */
+  /* USER CODE END TIM4_Init 2 */
 
 }
 
@@ -362,6 +471,22 @@ static void MX_USB_OTG_FS_PCD_Init(void)
 }
 
 /**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA1_Stream3_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream3_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream3_IRQn);
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -387,13 +512,13 @@ static void MX_GPIO_Init(void)
                           |GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0|GPIO_PIN_3, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_0|newLED_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, LD1_Pin|LD3_Pin|LD2_Pin|GPIO_PIN_8, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, LD1_Pin|LD3_Pin|LD2_Pin|funk_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(USB_PowerSwitchOn_GPIO_Port, USB_PowerSwitchOn_Pin, GPIO_PIN_RESET);
@@ -413,8 +538,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOF, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PC0 PC3 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_3;
+  /*Configure GPIO pins : PC0 newLED_Pin */
+  GPIO_InitStruct.Pin = GPIO_PIN_0|newLED_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -427,8 +552,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : LD1_Pin LD3_Pin LD2_Pin PB8 */
-  GPIO_InitStruct.Pin = LD1_Pin|LD3_Pin|LD2_Pin|GPIO_PIN_8;
+  /*Configure GPIO pins : LD1_Pin LD3_Pin LD2_Pin funk_Pin */
+  GPIO_InitStruct.Pin = LD1_Pin|LD3_Pin|LD2_Pin|funk_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -447,64 +572,82 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(USB_OverCurrent_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : PB9 */
-  GPIO_InitStruct.Pin = GPIO_PIN_9;
-  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  GPIO_InitStruct.Alternate = GPIO_AF13_DCMI;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
-void delay350Microseconds(uint32_t n)
-{
-    uint32_t totalMicroseconds = n * 350;
 
-    // approximation milliseconds
-    if (totalMicroseconds >= 1000) {
-        uint32_t ogMilliseconds = totalMicroseconds / 1000;
-        uint32_t remainderMicroseconds = totalMicroseconds % 1000;
 
-        if (ogMilliseconds > 0) {
-            HAL_Delay(ogMilliseconds);
-        }
-
-        // remainder (approximate)
-        if (remainderMicroseconds > 0) {
-            uint32_t cycles = remainderMicroseconds * 48;
-        }
-    } else {
-        // wait for short delays (< 1ms)
-        uint32_t cycles = totalMicroseconds * 48;
-    }
-}
 // define light functions
-void turnOffAllSegments(void) {
+void turnOffAllSegments() {
 	for(int i = 0; i < 10; i++) {
 		HAL_GPIO_WritePin(segments[i].port, segments[i].pin, GPIO_PIN_RESET);
 	}
 }
-	void gradualLightUp(void) {
+
+void gradualLightUp(int lights) {
 		turnOffAllSegments();
 
-		for(int i = 0; i < 10; i++) {
+		for(int i = 0; i < lights; i++) {
 			HAL_GPIO_WritePin(segments[i].port, segments[i].pin, GPIO_PIN_SET);
-			delay350Microseconds(1000);
+			HAL_Delay(1000);
 		}
 	}
 
-	void gradualLightDown(void) {
+void gradualLightDown() {
 		for(int i = 9; i >= 0; i--) {
 			HAL_GPIO_WritePin(segments[i].port, segments[i].pin, GPIO_PIN_RESET);
-			delay350Microseconds(1000);
+			HAL_Delay(1000);
 		}
 	}
 
+void LightUp(int lights) {
+		turnOffAllSegments();
+
+		for(int i = 0; i < lights; i++) {
+			HAL_GPIO_WritePin(segments[i].port, segments[i].pin, GPIO_PIN_SET);
+			HAL_Delay(1);
+		}
+
+	}
+
+uint32_t get_current_volume(void) {
+    // Simple implementation - just returns a test value
+    static uint32_t test_volume = 0;
+    test_volume = (test_volume + 500) % 32768;
+    return test_volume;
+}
+
+// Add DMA callbacks
+void HAL_I2S_RxHalfCpltCallback(I2S_HandleTypeDef* hi2s2) {
+	process_audio_buffer(0, hi2s2);
+//\timer = HAL_GetTick() - timer;
+
+}
+
+void HAL_I2S_RxCpltCallback(I2S_HandleTypeDef* hi2s2) {
+    process_audio_buffer(1000/2, hi2s2);
+    recording_finished = true;
+}
+
+int __io_putchar(int ch)
+{
+    uint8_t c[1];
+    c[0] = ch & 0x00FF;
+    HAL_UART_Transmit(&huart3, &*c, 1, 10);
+    return ch;
+}
+int _write(int file, char *ptr, int len)
+{
+int DataIdx;
+for(DataIdx = 0; DataIdx < len; DataIdx++)
+{
+__io_putchar(*ptr++);
+}
+return len;
+}
 
 /* USER CODE END 4 */
 
