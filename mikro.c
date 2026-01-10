@@ -40,6 +40,8 @@ volatile uint32_t pcm_index = 0;
 volatile bool stecker_an = false;
 volatile bool recordingFinished = false;
 static uint32_t currentVolume = 0;
+volatile bool schwellwert_passed = false;
+volatile uint32_t counter = 0;
 
 uint32_t timer;
 uint32_t timerStart;
@@ -111,9 +113,9 @@ void getSamples () {
 
 	uint32_t TimePassed_ms = HAL_GetTick() - TimeBegin_ms;
 	LED_ansteuern(MAX_MIKRO);
-	for (int i = 0; i < I2S_DMA_BUF_SIZE*2; i++) {
+	 /*for (int i = 0; i < I2S_DMA_BUF_SIZE*2; i++) {
 		inputBuffer[i] = 0;
-	}
+	}*/
 
 }
 
@@ -182,19 +184,47 @@ void process_audio_buffer(uint32_t offset, I2S_HandleTypeDef* hi2s2)
 		const uint32_t half_size = DMA_HALF_SIZE;
 
 	    // Loop through the Half, stepping by 4 (2*16bit words for the sample + 2*16bit words for the right channel).
-		pcm_index = 0;
+
 		for (uint32_t i = 0; i < half_size; i += 4) {
+			if (pcm_index >= PCM_SAMPLES_PER_SEC) {
+				pcm_index = 0;
+			}
 
 	        if (pcm_index < PCM_SAMPLES_PER_SEC) {
 
-	            // 1. Reconstruct 32-bit Frame
+	            // Reconstruct 32-bit Frame
 
 	        	uint32_t mergedValue = (inputBuffer[offset + i ] << 16) | inputBuffer[offset + i + 1];
-	            // 2. Extract 18-bit Sample and convert to signed 16-bit integer.
+	            // Extract 18-bit Sample and convert to signed 16-bit integer.
 	            int16_t finalSample = (int16_t)(mergedValue >> 14);
 
-	            // 3. Store the clean Mono Sample
+	            //  Store the clean Mono Sample
+
+	            //check if schwellwert passed
 	            pcmSamples[pcm_index] = finalSample;
+	            if (finalSample >= SCHWELLWERT && schwellwert_passed == false) {
+	            	int temp = pcm_index - 4000;
+	            	if (temp < 0) {
+	            		temp = 16000 + temp;
+	            	}
+	            	for (int j = 0; j < 4000; j++) {
+	            		safedValues[j] = pcmSamples[temp];
+	            		temp = (temp + 1) % PCM_SAMPLES_PER_SEC;
+	            		counter = j;
+	            	}
+	            	schwellwert_passed = true;
+	            }
+	            if (schwellwert_passed) {
+	            	safedValues[counter] = pcmSamples[pcm_index];
+	            	counter++;
+	            }
+	            if (counter >= PCM_SAMPLES_PER_SEC) {
+	            	convert();
+	            }
+	            // safe 1600 values (4000 before 16000-4000 after)
+	            // pass those values into mfcc (new function)
+
+
 
 	        	/*uint16_t low  = inputBuffer[offset + i];
 	        	        uint16_t high = inputBuffer[offset + i + 1];
@@ -310,6 +340,12 @@ void process_audio_buffer(uint32_t offset, I2S_HandleTypeDef* hi2s2)
 		}
 		LightUp(lights);
 		//delay350Microseconds(1);
+
+
+	}
+
+	void convert() {
+		//TODO convert safeValues to mfcc
 
 
 	}
